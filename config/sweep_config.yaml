@@ -1,0 +1,101 @@
+program: ./code/train.py
+method: grid # grid, random, bayes
+metric:
+  name: val_accuracy/top5  # 注意：top5 应与下方 topk_eval 列表的第一个值 [5, ...] 保持一致
+  goal: maximize
+
+parameters:
+  # 固定参数（必须写入的参数）
+  use_wandb:
+    value: true
+  
+  data_path:
+    value: ./data
+  
+  dataset_type:
+    value: CelebA
+  
+  epochs:
+    values: [5,10]
+  
+  loss_type:
+    value: infonce
+  
+  warmup_epochs:
+    value: 5
+  
+  progressive_hard_ratio:
+    value: 0.05
+  
+  eval_ratio:
+    value: 0.2                    # 暂时没有用
+  
+  topk_eval:
+    value: [5, 10, 20, 50]  # 重要：如果修改此列表，请同步更新上方 metric.name 中的 topX 值
+  
+  eval_interval:
+    value: 4
+  
+  seed:
+    value: 42
+  
+  # 搜索参数
+  output_dim:
+    values: [64]            # [16, 32, 64, 128, 256]
+  
+  num_samples:
+    values: [10000]         #[10000, 20000, 50000, 100000]
+  
+  hidden_dims:
+    values:
+      - [256, 128]
+      #- [256]
+      #- [256, 64]
+  
+  dropout:
+    values: [0.1]           #[0.1, 0.3, 0.5]
+  
+  activation:
+    values: [relu]          #['relu', 'tanh', 'sigmoid']
+  
+  batch_size:
+    values: [128]           # [32, 64, 128, 256]
+  
+  # lr:
+  #   distribution: log_uniform_values
+  #   min: 1e-6
+  #   max: 1e-2
+  lr:
+    values: [1e-3]
+
+  alpha:
+    values: [0.7]           # [0.0, 0.2, 0.4, 0.6, 0.8, 1.0]
+  
+  k_neighbors:
+    values: [5]             # [1, 2, 3, 5, 10, 20, 50]
+  
+  temperature:
+    values: [0.07]          # [0.001, 0.01, 0.07, 0.2, 0.5, 1.0]
+  
+  sample_strategy:
+    values: [progressive]   # ['random', 'hard', 'progressive']
+  
+  neg_sample_ratio:
+    values: [4]              # [1, 2, 4, 6, 10, 20]
+  
+  hard_negative_ratio:
+    values: [0.7]           # [0.2, 0.4, 0.6, 0.8, 1.0]
+  
+  hard_negative_range:
+    values: [30]            # [5, 10, 30, 50, 100, 200, 500]
+
+# ====================================================================
+# Sweep元数据配置
+# 这些参数影响wandb的组织结构，但不会传递给训练脚本
+# ====================================================================
+name: ae_contrastive_sweep  # Sweep的名称，用于在wandb界面中识别
+project: ae-contrastive      # 项目名称，会覆盖代码中的wandb_project参数
+entity: zhanghan0016-university-of-washington  # 实体名称，会覆盖代码中的wandb_entity参数
+
+# 运行数量配置（可根据需要调整）
+# count: 100  # 总共运行的实验数量，可以根据需要取消注释并设置

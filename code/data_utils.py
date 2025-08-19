@@ -347,7 +347,6 @@ def create_data_loaders(data_path, args, val_split=0.1):
     all_ids = list(vector_dict.keys())
     n_samples = len(all_ids)
     
-    random.seed(args.seed)
     random.shuffle(all_ids)
     
     # 划分训练集和验证集

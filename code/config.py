@@ -1,17 +1,25 @@
 import argparse
 import torch
+import ast
+
+def str_to_list(s):
+   """将字符串形式的列表转换为真正的列表"""
+   if isinstance(s, list):
+       return s
+   return ast.literal_eval(s)
+
 
 def get_args():
     parser = argparse.ArgumentParser(description='AutoEncoder with Contrastive Learning for Dimensionality Reduction')
     
     # 数据相关参数
     parser.add_argument('--data_path', type=str, default="./data", help='输入数据路径')
-    parser.add_argument('--output_dim', type=int, default=128, help='降维后的目标维度')
+    parser.add_argument('--output_dim', type=int, default=64, help='降维后的目标维度')
     parser.add_argument('--dataset_type', type=str, default='CelebA', help='数据集类型')
     parser.add_argument('--num_samples', type=int, default=10000, help='使用向量个数')
     
     # 模型相关参数
-    parser.add_argument('--hidden_dims', nargs='+', type=int, default=[256, 128], 
+    parser.add_argument('--hidden_dims', type=str, default="[256, 128]", 
                         help='AutoEncoder隐藏层维度列表')
     parser.add_argument('--dropout', type=float, default=0.1, help='Dropout率')
     parser.add_argument('--activation', type=str, default='relu', 
@@ -22,7 +30,7 @@ def get_args():
     parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
     parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
     parser.add_argument('--weight_decay', type=float, default=1e-5, help='权重衰减')
-    parser.add_argument('--alpha', type=float, default=1, 
+    parser.add_argument('--alpha', type=float, default=0.7,
                         help='对比损失权重 (总损失 = (1-alpha)*重构损失 + alpha*对比损失)')
     
     # 对比学习相关参数
@@ -50,7 +58,7 @@ def get_args():
     # 评估相关参数
     parser.add_argument('--eval_ratio', type=float, default=0.1, 
                         help='评估时采样的实体比例')
-    parser.add_argument('--topk_eval', nargs='+', type=int, default=[5,10,20,50], 
+    parser.add_argument('--topk_eval', type=str, default="[5,10,20,50]", 
                         help='评估时的top-k值列表')
     parser.add_argument('--eval_interval', type=int, default=4, help='评估间隔')
     
@@ -59,11 +67,13 @@ def get_args():
     parser.add_argument('--device', type=str, default='cuda' if torch.cuda.is_available() else 'cpu')
     parser.add_argument('--num_workers', type=int, default=0, help='数据加载线程数')
     parser.add_argument('--save_dir', type=str, default='./checkpoints', help='模型保存路径')
-    parser.add_argument('--use_wandb', action='store_true', help='是否使用wandb')
+    parser.add_argument('--use_wandb', type=lambda x: x.lower() == 'true', default=False, help='是否使用wandb')
     parser.add_argument('--wandb_project', type=str, default='ae-contrastive', help='wandb项目名')
-    parser.add_argument('--wandb_entity', type=str, default=None, help='wandb运行entity')
+    parser.add_argument('--wandb_entity', type=str, default="zhanghan0016-university-of-washington", help='wandb运行entity')
     
     args = parser.parse_args()
+    args.hidden_dims = str_to_list(args.hidden_dims)
+    args.topk_eval = str_to_list(args.topk_eval)
     
     # 参数验证
     if args.sample_strategy == 'hard':

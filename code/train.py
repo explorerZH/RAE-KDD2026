@@ -198,7 +198,6 @@ def evaluate_knn_preservation(model, train_dataset, val_dataset, args):
     # 计算训练集内部的k近邻保持度
     max_k = max(args.topk_eval)
 
-    
     train_embeddings = F.normalize(train_embeddings,p=2,dim=1)
 
     train_original_knn = compute_knn_order(train_original, max_k, train_dataset.ids)
@@ -211,29 +210,31 @@ def evaluate_knn_preservation(model, train_dataset, val_dataset, args):
     )
     
     # 2. 验证集的k近邻保持度（验证集在训练集中的近邻）
-    # val_vectors = val_dataset.vectors.to(args.device)
-    # with torch.no_grad():
-    #     val_embeddings = model.encode(val_vectors).cpu().numpy()
-    # val_original = val_vectors.cpu().numpy()
+    val_vectors = val_dataset.vectors.to(args.device)
+    with torch.no_grad():
+        val_embeddings = model.encode(val_vectors).cpu()
+    val_original = val_vectors.cpu().numpy()
     
-    # # 计算验证集在训练集中的k近邻
-    # val_original_knn = compute_knn_cross_set(
-    #     val_original, train_original, max_k, 
-    #     val_dataset.ids, train_dataset.ids
-    # )
-    # val_reduced_knn = compute_knn_cross_set(
-    #     val_embeddings, train_embeddings, max_k,
-    #     val_dataset.ids, train_dataset.ids
-    # )
+    val_embeddings = F.normalize(val_embeddings,p=2,dim=1)
+
+    # 计算验证集在训练集中的k近邻
+    val_original_knn = compute_knn_cross_set(
+        val_original, train_original, max_k, 
+        val_dataset.ids, train_dataset.ids
+    )
+    val_reduced_knn = compute_knn_cross_set(
+        val_embeddings, train_embeddings, max_k,
+        val_dataset.ids, train_dataset.ids
+    )
     
-    # val_accuracy = calculate_accuracy(
-    #     val_original_knn,
-    #     val_reduced_knn,
-    #     args.topk_eval
-    # )
+    val_accuracy = calculate_accuracy(
+        val_original_knn,
+        val_reduced_knn,
+        args.topk_eval
+    )
     
     results['train'] = train_accuracy
-    # results['val'] = val_accuracy
+    results['val'] = val_accuracy
     
     return results
 
@@ -246,7 +247,7 @@ def compute_knn_cross_set(query_vectors, base_vectors, k, query_ids, base_ids):
         base_vectors = base_vectors.cpu().numpy()
     
     # 使用FAISS计算k近邻
-    index = faiss.IndexFlatL2(base_vectors.shape[1])
+    index = faiss.IndexFlatIP(base_vectors.shape[1])
     index.add(base_vectors.astype(np.float32))
     
     distances, indices = index.search(query_vectors.astype(np.float32), k)
@@ -262,19 +263,17 @@ def compute_knn_cross_set(query_vectors, base_vectors, k, query_ids, base_ids):
 
 
 def main():
-    # 解析命令行参数
     args = get_args()
-    
-    # 设置随机种子
     set_seed(args.seed)
     
-    # 初始化wandb（如果启用）
+    # 初始化wandb
     if args.use_wandb:
         import wandb
+         # 正式实验时请在此处写明本组实验所探究的内容，方便官网浏览
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",
+            name=f"run_{datetime.now().strftime('%Y%m%d_%H%M%S')}",       
             config=vars(args)
         )
     
@@ -354,20 +353,20 @@ def main():
             for k, acc in accuracy_results['train'].items():
                 print(f"  {k}: {acc:.4f}")
             
-            # print("验证集k近邻保持准确度:")
-            # for k, acc in accuracy_results['val'].items():
-            #     print(f"  {k}: {acc:.4f}")
+            print("验证集k近邻保持准确度:")
+            for k, acc in accuracy_results['val'].items():
+                print(f"  {k}: {acc:.4f}")
             
             # 记录到wandb
             if args.use_wandb:
                 wandb.log({
                     f'train_accuracy/{k}': acc
                     for k, acc in accuracy_results['train'].items()
-                })
-                # wandb.log({
-                #     f'val_accuracy/{k}': acc
-                #     for k, acc in accuracy_results['val'].items()
-                # })
+                }, step = epoch + 1)
+                wandb.log({
+                    f'val_accuracy/{k}': acc
+                    for k, acc in accuracy_results['val'].items()
+                },step = epoch + 1)
         
         # 记录到wandb
         if args.use_wandb:
@@ -379,25 +378,24 @@ def main():
                 'val/reconstruction_loss': val_recon_loss,
                 'val/contrastive_loss': val_contrast_loss,
                 'lr': scheduler.get_last_lr()[0],
-                'epoch': epoch + 1
-            })
+            },step = epoch + 1)
         
         # 保存最佳模型
-        if val_loss < best_val_loss:
-            best_val_loss = val_loss
-            checkpoint = {
-                'epoch': epoch + 1,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'scheduler_state_dict': scheduler.state_dict(),
-                'val_loss': val_loss,
-                'args': args
-            }
-            torch.save(
-                checkpoint,
-                os.path.join(args.save_dir, 'best_model.pth')
-            )
-            print("保存最佳模型!")
+        # if val_loss < best_val_loss:
+        #     best_val_loss = val_loss
+        #     checkpoint = {
+        #         'epoch': epoch + 1,
+        #         'model_state_dict': model.state_dict(),
+        #         'optimizer_state_dict': optimizer.state_dict(),
+        #         'scheduler_state_dict': scheduler.state_dict(),
+        #         'val_loss': val_loss,
+        #         'args': args
+        #     }
+        #     torch.save(
+        #         checkpoint,
+        #         os.path.join(args.save_dir, 'best_model.pth')
+        #     )
+        #     print("保存最佳模型!")
     
     # 最终评估
     print("\n最终评估...")
@@ -414,7 +412,6 @@ def main():
     # 保存最终结果
     results = {
         'args': vars(args),
-        'best_val_loss': best_val_loss,
         'final_train_accuracy': final_accuracy['train'],
         'final_val_accuracy': final_accuracy['val']
     }
