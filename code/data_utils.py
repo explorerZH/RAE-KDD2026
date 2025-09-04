@@ -11,7 +11,7 @@ class VectorDataset(Dataset):
     """
     向量数据集类 - 改进版本，支持批次时预采样
     """
-    def __init__(self, vectors, ids, k_neighbors=10, neg_sample_ratio=5,
+    def __init__(self, vectors, ids, args = None, k_neighbors=10, neg_sample_ratio=5,
                  hard_negative_ratio=0.5, hard_negative_range=10,
                  sample_strategy='random', initial_hard_ratio=None,
                  train_vectors=None, train_ids=None, is_validation=False):
@@ -30,8 +30,10 @@ class VectorDataset(Dataset):
             is_validation: 是否为验证集
         """
         # 归一化向量
-        self.vectors = self._normalize_vectors(vectors)
+        self.vectors = vectors
+        self.normalize_vectors = self._normalize_vectors(vectors)
         self.ids = ids
+        self.args = args
         self.k_neighbors = k_neighbors
         self.neg_sample_ratio = neg_sample_ratio
         self.target_hard_negative_ratio = hard_negative_ratio
@@ -44,21 +46,23 @@ class VectorDataset(Dataset):
         if is_validation:
             assert train_vectors is not None and train_ids is not None, \
                 "验证集需要提供训练集向量和ID"
-            self.train_vectors = self._normalize_vectors(train_vectors)
+            self.train_vectors = train_vectors
+            self.normalize_train_vectors = self._normalize_vectors(train_vectors)
             self.train_ids = train_ids
-            self.reference_vectors = self.train_vectors  # 参考向量集
         else:
             self.train_vectors = None
             self.train_ids = None
-            self.reference_vectors = self.vectors  # 训练集的参考向量是自己
         
         # 计算k近邻和相似度
-        print(f"计算k近邻标签矩阵（{'验证集->训练集' if is_validation else '训练集内部'}）...")
-        self.knn_indices, self.knn_similarities = self._compute_knn_indices_and_similarities()
-        
-        # 预计算每个样本的正负样本索引
-        print(f"预计算正负样本索引...")
-        self.pos_indices, self.neg_indices = self._precompute_pos_neg_indices()
+        if self.sample_strategy != 'pure_ae':
+            print(f"计算k近邻标签矩阵（{'验证集->训练集' if is_validation else '训练集内部'}）...")
+            self.knn_indices, self.knn_similarities = self._compute_knn_indices_and_similarities()
+            
+            # 预计算每个样本的正负样本索引
+            print(f"预计算正负样本索引...")
+            self.pos_indices, self.neg_indices = self._precompute_pos_neg_indices()
+        else:
+            print("当前为纯auto-encoder学习，无需额外采样策略")
     
     def _normalize_vectors(self, vectors):
         """对向量进行L2归一化"""
@@ -77,7 +81,10 @@ class VectorDataset(Dataset):
             d = query_vectors.shape[1]
             
             # 使用内积搜索（归一化向量的余弦相似度）
-            index = faiss.IndexFlatIP(d)
+            if self.args.distance_metric == 'euclidean':
+                index = faiss.IndexFlatL2(d)
+            else:
+                index = faiss.IndexFlatIP(d)
             index.add(base_vectors.astype(np.float32))
             
             # 搜索k+h近邻
@@ -92,7 +99,10 @@ class VectorDataset(Dataset):
             d = vectors_np.shape[1]
             
             # 使用内积搜索
-            index = faiss.IndexFlatIP(d)
+            if self.args.distance_metric == 'euclidean':
+                index = faiss.IndexFlatL2(d)
+            else:
+                index = faiss.IndexFlatIP(d)
             index.add(vectors_np.astype(np.float32))
             
             # 搜索k+h+1近邻（包括自身）
@@ -229,11 +239,14 @@ class VectorDataset(Dataset):
     
     def __getitem__(self, idx):
         """返回anchor及其正负样本的索引"""
-        return {
-            'anchor_idx': idx,
-            'pos_indices': self.pos_indices[idx],
-            'neg_indices': self.neg_indices[idx]
-        }
+        if self.sample_strategy == 'pure_ae':
+            return {'anchor_idx':idx}
+        else:
+            return {
+                'anchor_idx': idx,
+                'pos_indices': self.pos_indices[idx],
+                'neg_indices': self.neg_indices[idx]
+            }
 
 
 def custom_collate_fn(batch, dataset):
@@ -245,12 +258,17 @@ def custom_collate_fn(batch, dataset):
     # 收集所有anchor索引
     anchor_indices = [item['anchor_idx'] for item in batch]
     
+    if dataset.sample_strategy == 'pure_ae':
+        all_vectors = dataset.vectors[anchor_indices]                       # 这里需要选择是否需要归一化向量
+        return {'vectors': all_vectors}
+    
     if dataset.is_validation:
         # 验证集：需要同时处理验证集向量和训练集向量
         # anchor来自验证集，正负样本来自训练集
         
         # 收集验证集的anchor向量
-        val_vectors = dataset.vectors[anchor_indices]
+        # val_vectors = dataset.vectors[anchor_indices]          # 未归一向量参与计算
+        val_vectors = dataset.normalize_vectors[anchor_indices] # 归一向量参与计算
         
         # 收集训练集中需要的索引（正负样本）
         train_indices_set = set()
@@ -261,7 +279,8 @@ def custom_collate_fn(batch, dataset):
         train_indices = sorted(list(train_indices_set))
         
         # 获取训练集向量
-        train_vectors = dataset.train_vectors[train_indices]
+        # train_vectors = dataset.train_vectors[train_indices]      # 未归一向量参与计算
+        train_vectors = dataset.normalize_train_vectors[train_indices]  # 归一向量参与计算
         
         # 合并向量：先放验证集anchor，再放训练集向量
         all_vectors = torch.cat([val_vectors, train_vectors], dim=0)
@@ -304,8 +323,9 @@ def custom_collate_fn(batch, dataset):
         idx_map = {orig_idx: batch_idx for batch_idx, orig_idx in enumerate(all_indices)}
         
         # 获取所有需要的向量
-        all_vectors = dataset.vectors[all_indices]
-        
+        # all_vectors = dataset.vectors[all_indices]             # 未归一向量参与计算
+        all_vectors = dataset.normalize_vectors[all_indices]  # 归一向量参与计算
+
         # 构建batch内的索引
         batch_anchor_indices = torch.tensor([idx_map[idx] for idx in anchor_indices], dtype=torch.long)
         
@@ -371,6 +391,7 @@ def create_data_loaders(data_path, args, val_split=0.1):
     train_dataset = VectorDataset(
         train_vectors,
         train_ids,
+        args=args,
         k_neighbors=args.k_neighbors,
         neg_sample_ratio=args.neg_sample_ratio,
         hard_negative_ratio=args.hard_negative_ratio,  # 目标比例
@@ -384,11 +405,12 @@ def create_data_loaders(data_path, args, val_split=0.1):
     val_dataset = VectorDataset(
         val_vectors,
         val_ids,
+        args=args,
         k_neighbors=args.k_neighbors,
         neg_sample_ratio=args.neg_sample_ratio,
         hard_negative_ratio=0.0,  # 验证集使用随机采样
         hard_negative_range=args.hard_negative_range,
-        sample_strategy='random',
+        sample_strategy=initial_strategy if args.sample_strategy !="hard" else "random", 
         train_vectors=train_vectors,  # 提供训练集向量
         train_ids=train_ids,  # 提供训练集ID
         is_validation=True  # 标记为验证集
@@ -418,11 +440,11 @@ def create_data_loaders(data_path, args, val_split=0.1):
     print(f"k近邻数: {args.k_neighbors}")
     print(f"负样本比例: {args.neg_sample_ratio}")
     
-    return train_loader, val_loader, train_dataset, val_dataset, vector_dict
+    return train_loader, val_loader, train_dataset, val_dataset, train_vectors.numpy(),val_vectors.numpy()
 
 
 # 保留原有的辅助函数
-def compute_knn_order(embeddings, k, ids=None):
+def compute_knn_order(embeddings, k, distance_metric, ids=None):
     """计算k近邻顺序"""
     if isinstance(embeddings, torch.Tensor):
         embeddings = embeddings.cpu().numpy()
@@ -431,8 +453,10 @@ def compute_knn_order(embeddings, k, ids=None):
     
     if ids is None:
         ids = list(range(n_samples))
-    
-    index = faiss.IndexFlatIP(embeddings.shape[1])
+    if distance_metric=='euclidean':
+        index = faiss.IndexFlatL2(embeddings.shape[1])
+    else:
+        index = faiss.IndexFlatIP(embeddings.shape[1])
     index.add(embeddings.astype(np.float32))
     
     distances, indices = index.search(embeddings.astype(np.float32), min(k + 1, n_samples))

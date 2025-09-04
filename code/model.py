@@ -22,37 +22,45 @@ class AutoEncoder(nn.Module):
             self.activation = nn.Sigmoid()
         else:
             self.activation = nn.ReLU()
-        
+
         # 构建编码器
         encoder_layers = []
         prev_dim = input_dim
-        for hidden_dim in hidden_dims:
-            encoder_layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                self.activation,
-                nn.Dropout(dropout)
-            ])
-            prev_dim = hidden_dim
-        
+
+        if hidden_dims:  # 如果有隐藏层
+            for hidden_dim in hidden_dims:
+                encoder_layers.extend([
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    self.activation,
+                    nn.Dropout(dropout)
+                ])
+                prev_dim = hidden_dim
         # 添加最后的降维层
-        encoder_layers.append(nn.Linear(prev_dim, output_dim))
+            encoder_layers.append(nn.Linear(prev_dim, output_dim))
+        else:  # 直接映射，无隐藏层
+            encoder_layers.append(nn.Linear(input_dim, output_dim))
+
         self.encoder = nn.Sequential(*encoder_layers)
-        
+
         # 构建解码器 (镜像结构)
         decoder_layers = []
         prev_dim = output_dim
-        for hidden_dim in reversed(hidden_dims):
-            decoder_layers.extend([
-                nn.Linear(prev_dim, hidden_dim),
-                nn.LayerNorm(hidden_dim),
-                self.activation,
-                nn.Dropout(dropout)
-            ])
-            prev_dim = hidden_dim
-        
-        # 添加最后的重构层
-        decoder_layers.append(nn.Linear(prev_dim, input_dim))
+
+        if hidden_dims:  # 如果有隐藏层
+            for hidden_dim in reversed(hidden_dims):
+                decoder_layers.extend([
+                    nn.Linear(prev_dim, hidden_dim),
+                    nn.LayerNorm(hidden_dim),
+                    self.activation,
+                    nn.Dropout(dropout)
+                ])
+                prev_dim = hidden_dim
+            # 添加最后的重构层
+            decoder_layers.append(nn.Linear(prev_dim, input_dim))
+        else:  # 直接映射，无隐藏层
+            decoder_layers.append(nn.Linear(output_dim, input_dim))
+
         self.decoder = nn.Sequential(*decoder_layers)
         
     

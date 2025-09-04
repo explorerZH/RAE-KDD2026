@@ -14,37 +14,42 @@ def get_args():
     
     # 数据相关参数
     parser.add_argument('--data_path', type=str, default="./data", help='输入数据路径')
-    parser.add_argument('--output_dim', type=int, default=64, help='降维后的目标维度')
+    parser.add_argument('--output_dim', type=int, default=256, help='降维后的目标维度')
     parser.add_argument('--dataset_type', type=str, default='CelebA', help='数据集类型')
     parser.add_argument('--num_samples', type=int, default=10000, help='使用向量个数')
+    parser.add_argument('--distance_metric',type=str, default="cosine",
+                        choices=['cosine','inner_product','euclidean'],help="选择使用的距离度量指标")
     
     # 模型相关参数
-    parser.add_argument('--hidden_dims', type=str, default="[256, 128]", 
+    parser.add_argument('--hidden_dims', type=str, default="[]", 
                         help='AutoEncoder隐藏层维度列表')
-    parser.add_argument('--dropout', type=float, default=0.1, help='Dropout率')
-    parser.add_argument('--activation', type=str, default='relu', 
+    parser.add_argument('--dropout', type=float, default=0.0, help='Dropout率')
+    parser.add_argument('--activation', type=str, default='tanh', 
                         choices=['relu', 'tanh', 'sigmoid'], help='激活函数')
     
     # 训练相关参数
     parser.add_argument('--batch_size', type=int, default=128, help='批次大小')
-    parser.add_argument('--epochs', type=int, default=100, help='训练轮数')
+    parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=1e-5, help='权重衰减')
-    parser.add_argument('--alpha', type=float, default=0.7,
+    parser.add_argument('--weight_decay', type=float, default=1e-7, help='权重衰减')
+    parser.add_argument('--alpha', type=float, default=0,
                         help='对比损失权重 (总损失 = (1-alpha)*重构损失 + alpha*对比损失)')
+    parser.add_argument('--optimizer',type =str, default="Adam", help='优化器选择')
     
     # 对比学习相关参数
-    parser.add_argument('--k_neighbors', type=int, default=10, help='k近邻数量')
+    parser.add_argument('--k_neighbors', type=int, default=5, help='k近邻数量')
     parser.add_argument('--loss_type', type=str, default='infonce', 
                         choices=['contrastive', 'triplet', 'infonce'], help='对比损失类型')
     parser.add_argument('--temperature', type=float, default=0.07, help='InfoNCE温度参数')
-    parser.add_argument('--margin', type=float, default=1.0, help='Triplet loss的margin')
+    parser.add_argument('--margin', type=float, default=0.0, help='Triplet loss的margin')
     
     # 采样策略相关参数
-    parser.add_argument('--sample_strategy', type=str, default='progressive',
-                        choices=['random', 'hard', 'progressive'], 
-                        help='采样策略：random(随机), hard(困难负样本挖掘), progressive(渐进式)')
-    parser.add_argument('--neg_sample_ratio', type=int, default=4, 
+    parser.add_argument('--sample_strategy', type=str, default='random',
+                        choices=['random', 'hard', 'progressive','pure_ae'], 
+                        help='采样策略：random(随机), hard(困难负样本挖掘), progressive(渐进式),pure_ae(仅auto-encoder)')
+    parser.add_argument('--random_refresh_interval',type=int, default=3,
+                        help='随机采样策略下，负样本刷新间隔(每过几个epoch刷新一次负样本采样)')
+    parser.add_argument('--neg_sample_ratio', type=int, default=20, 
                         help='负样本采样比例 (相对于正样本数量)')
     parser.add_argument('--hard_negative_ratio', type=float, default=0.7,
                         help='困难负样本占总负样本的比例 (仅在非random策略下使用)')
@@ -55,12 +60,13 @@ def get_args():
     parser.add_argument('--progressive_hard_ratio', type=float, default=0.05,
                         help='渐进式策略中初始的困难负样本比例 (仅在progressive策略下使用)')
     
+    
     # 评估相关参数
     parser.add_argument('--eval_ratio', type=float, default=0.1, 
                         help='评估时采样的实体比例')
-    parser.add_argument('--topk_eval', type=str, default="[5,10,20,50]", 
+    parser.add_argument('--topk_eval', type=str, default="[1,5,10,20,50]", 
                         help='评估时的top-k值列表')
-    parser.add_argument('--eval_interval', type=int, default=4, help='评估间隔')
+    parser.add_argument('--eval_interval', type=int, default=1, help='评估间隔')
     
     # 其他参数
     parser.add_argument('--seed', type=int, default=42, help='随机种子')
