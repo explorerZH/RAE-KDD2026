@@ -293,7 +293,7 @@ def main():
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=f"no_normalize_{datetime.now().strftime('%Y%m%d_%H%M%S')}",       
+            name=f"cos_normalize88_{datetime.now().strftime('%Y%m%d_%H%M%S')}",       
             config=vars(args)
         )
     

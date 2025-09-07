@@ -31,7 +31,7 @@ def get_args():
     parser.add_argument('--batch_size', type=int, default=128, help='批次大小')
     parser.add_argument('--epochs', type=int, default=50, help='训练轮数')
     parser.add_argument('--lr', type=float, default=1e-3, help='学习率')
-    parser.add_argument('--weight_decay', type=float, default=1e-7, help='权重衰减')
+    parser.add_argument('--weight_decay', type=float, default=2e-7, help='权重衰减')
     parser.add_argument('--alpha', type=float, default=0,
                         help='对比损失权重 (总损失 = (1-alpha)*重构损失 + alpha*对比损失)')
     parser.add_argument('--optimizer',type =str, default="Adam", help='优化器选择')
@@ -44,9 +44,12 @@ def get_args():
     parser.add_argument('--margin', type=float, default=0.0, help='Triplet loss的margin')
     
     # 采样策略相关参数
-    parser.add_argument('--sample_strategy', type=str, default='random',
-                        choices=['random', 'hard', 'progressive','pure_ae'], 
-                        help='采样策略：random(随机), hard(困难负样本挖掘), progressive(渐进式),pure_ae(仅auto-encoder)')
+    parser.add_argument('--sample_strategy', type=str, default='pure_ae',
+                        choices=['pure_ae','ae_kmse'], 
+                        help='采样策略：random(随机), hard(困难负样本挖掘), progressive(渐进式),pure_ae(仅auto-encoder),ae_kmse(加入近邻mse计算)')
+    parser.add_argument('--k_preserving_weight',type=str,default='[0.1,0.1,0.1,0.1,0.1]',
+                        help="kmse方法的k近邻距离权重(仅ae_kmse政策使用)")
+    parser.add_argument('--kmse_start_epoch',type=int,default=40,help='kmse开始的epoch时刻')
     parser.add_argument('--random_refresh_interval',type=int, default=3,
                         help='随机采样策略下，负样本刷新间隔(每过几个epoch刷新一次负样本采样)')
     parser.add_argument('--neg_sample_ratio', type=int, default=20, 
@@ -80,6 +83,7 @@ def get_args():
     args = parser.parse_args()
     args.hidden_dims = str_to_list(args.hidden_dims)
     args.topk_eval = str_to_list(args.topk_eval)
+    args.k_preserving_weight = str_to_list(args.k_preserving_weight)
     
     # 参数验证
     if args.sample_strategy == 'hard':
@@ -94,8 +98,5 @@ def get_args():
         print(f"  - 最终困难负样本比例: {args.hard_negative_ratio}")
         print(f"  - 困难负样本范围: k+1 到 k+{args.hard_negative_range}")
         print(f"  - 负样本总比例: {args.neg_sample_ratio}")
-    else:
-        print(f"使用随机负样本采样策略:")
-        print(f"  - 负样本比例: {args.neg_sample_ratio}")
-    
+
     return args
