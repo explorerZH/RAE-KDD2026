@@ -45,7 +45,7 @@ def get_args():
     
     # 采样策略相关参数
     parser.add_argument('--sample_strategy', type=str, default='pure_ae',
-                        choices=['pure_ae','ae_kmse'], 
+                        choices=['random','hard','progressive','pure_ae','ae_kmse'], 
                         help='采样策略：random(随机), hard(困难负样本挖掘), progressive(渐进式),pure_ae(仅auto-encoder),ae_kmse(加入近邻mse计算)')
     parser.add_argument('--k_preserving_weight',type=str,default='[0.1,0.1,0.1,0.1,0.1]',
                         help="kmse方法的k近邻距离权重(仅ae_kmse政策使用)")
