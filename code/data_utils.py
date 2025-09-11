@@ -259,7 +259,8 @@ def custom_collate_fn(batch, dataset):
     anchor_indices = [item['anchor_idx'] for item in batch]
     
     if dataset.sample_strategy == 'pure_ae':
-        all_vectors = dataset.normalize_vectors[anchor_indices]                       # 这里需要选择是否需要归一化向量
+        all_vectors = dataset.vectors[anchor_indices]
+        # all_vectors = dataset.normalize_vectors[anchor_indices]              # 这里需要选择是否需要归一化向量
         return {'vectors': all_vectors}
     
     if dataset.is_validation:

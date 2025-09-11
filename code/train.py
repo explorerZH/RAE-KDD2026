@@ -205,8 +205,11 @@ def evaluate_knn_preservation(model, train_dataset, val_dataset, args):
     results = {}
     
     # 1. 训练集的k近邻保持度（训练集内部）
-    # train_vectors = train_dataset.vectors.to(args.device)       # 未归一向量
-    train_vectors = train_dataset.normalize_vectors.to(args.device) # 归一向量
+    if args.distance_metric == 'cosine':
+        train_vectors = train_dataset.normalize_vectors.to(args.device) # 归一向量
+    else:
+        train_vectors = train_dataset.vectors.to(args.device)       # 未归一向量
+    
     with torch.no_grad():
         train_embeddings = model.encode(train_vectors).cpu()
     train_original = train_vectors.cpu()
@@ -214,7 +217,8 @@ def evaluate_knn_preservation(model, train_dataset, val_dataset, args):
     # 计算训练集内部的k近邻保持度
     max_k = max(args.topk_eval)
 
-    train_embeddings = F.normalize(train_embeddings,p=2,dim=1)      # 对降维后向量做归一操作 
+    if args.distance_metric == 'cosine':
+        train_embeddings = F.normalize(train_embeddings,p=2,dim=1)      # 对降维后向量做归一操作 
 
     train_original_knn = compute_knn_order(train_original, max_k, args.distance_metric, train_dataset.ids)
     train_reduced_knn = compute_knn_order(train_embeddings, max_k, args.distance_metric, train_dataset.ids)
@@ -226,13 +230,16 @@ def evaluate_knn_preservation(model, train_dataset, val_dataset, args):
     )
     
     # 2. 验证集的k近邻保持度（验证集在训练集中的近邻）
-    # val_vectors = val_dataset.vectors.to(args.device)           # 未归一向量
-    val_vectors = val_dataset.normalize_vectors.to(args.device)         # 归一向量
+    if args.distance_metric == "cosine":
+        val_vectors = val_dataset.normalize_vectors.to(args.device) # 归一向量
+    else:
+        val_vectors = val_dataset.vectors.to(args.device)           # 未归一向量
     with torch.no_grad():
         val_embeddings = model.encode(val_vectors).cpu()
     val_original = val_vectors.cpu().numpy()
     
-    val_embeddings = F.normalize(val_embeddings,p=2,dim=1)         # 对降维后向量做归一操作
+    if args.distance_metric == "cosine":
+        val_embeddings = F.normalize(val_embeddings,p=2,dim=1)         # 对降维后向量做归一操作
 
     # 计算验证集在训练集中的k近邻
     val_original_knn = compute_knn_cross_set(
@@ -293,7 +300,7 @@ def main():
         wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
-            name=f"cos_normalize88_{datetime.now().strftime('%Y%m%d_%H%M%S')}",       
+            name=f"cosine_SGD_{datetime.now().strftime('%Y%m%d_%H%M%S')}",       
             config=vars(args)
         )
     
@@ -336,6 +343,11 @@ def main():
             lr=args.lr,
             weight_decay=args.weight_decay
             )
+    elif args.optimizer == 'SGD':
+        optimizer = optim.SGD(
+            model.parameters(),
+            lr=args.lr,
+            weight_decay=args.weight_decay)
     else:
         raise ValueError("优化器参数设置有误，重新设置")
     
