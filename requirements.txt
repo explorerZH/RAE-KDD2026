@@ -1,0 +1,9 @@
+torch>=2.0
+numpy>=1.23
+scipy>=1.10
+scikit-learn>=1.2
+faiss-cpu>=1.7
+umap-learn>=0.5
+tqdm>=4.65
+# Optional, for experiment tracking
+# wandb>=0.16

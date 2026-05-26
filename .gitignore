@@ -1,0 +1,58 @@
+# Byte-compiled / optimized files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+build/
+dist/
+*.egg-info/
+
+# Datasets, embeddings, checkpoints, experiment outputs
+data/
+embeddings/
+checkpoints/
+results/
+result/
+result_pic*/
+output/
+wandb/
+runs/
+*.pkl
+*.npz
+*.npy
+*.fvecs
+*.bvecs
+*.ivecs
+*.ckpt
+*.pt
+*.pth
+
+# Logs / temp
+*.log
+*.tmp
+tempCodeRunnerFile.*
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local notes / exploratory material that should not be in the release
+note/
+document/
+prior_code/
+paper reading/
+8.30调研文献/
+science_material/
+PCA_BASELINE_*.md
+SIFT1M_GIST1M_*.md
+auto-encoder定义叙述.pdf
+git command handbook.txt
+*.png
+*.xlsx
+
+# Local Claude state
+.claude/

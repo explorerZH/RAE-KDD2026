@@ -1,470 +1,259 @@
+"""Train the RAE model.
+
+Implements the loss in Section 3.2 of the paper:
+
+    L = (1/N) * sum_i || W_d W_e x_i - x_i ||_2^2 + lambda * || W_e ||_F^2
+
+The Frobenius-norm regularization on the encoder is implemented via the
+optimizer's ``weight_decay``. Adam / AdamW with ``weight_decay=lambda``
+yields a gradient update term identical to differentiating the explicit
+penalty (see Eq. (10) in the paper).
+"""
 import json
+import os
 import random
+from datetime import datetime
+
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import torch.optim as optim
 from tqdm import tqdm
-from collections import defaultdict
-from datetime import datetime
-import os
-import torch.nn.functional as F
 
 from config import get_args
+from data_utils import (compute_knn_cross_set, compute_knn_order,
+                        create_data_loaders)
 from model import AutoEncoder
-from loss import InfoNCELoss
-from data_utils import create_data_loaders, compute_knn_order
-import faiss
+
 
 def set_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
     torch.manual_seed(seed)
     if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
         torch.cuda.manual_seed_all(seed)
 
 
-def calculate_accuracy(base_order, reduction_order, topK_num_list):
-    """计算降维前后k近邻的重合准确度"""
-    entity_ids = list(base_order.keys())
-    
-    similarity_dict = {}
-    for k in topK_num_list:
-        total_similarity = 0
-        for id in entity_ids:
-            set_a = set(item[0] for item in base_order[id][:k])
-            set_b = set(item[0] for item in reduction_order[id][:k])
-            
-            correct = len(set_b.intersection(set_a))
-            similarity = correct / k
-            total_similarity += similarity
-        
-        average_similarity = total_similarity / len(entity_ids)
-        similarity_dict[f"top{k}"] = average_similarity
-    
-    return similarity_dict
+def topk_accuracy(base_order, reduced_order, topk_list):
+    """Compute P_overall (Eq. (4)) for each top-k."""
+    keys = list(base_order.keys())
+    out = {}
+    for k in topk_list:
+        s = 0.0
+        for key in keys:
+            a = {item[0] for item in base_order[key][:k]}
+            b = {item[0] for item in reduced_order[key][:k]}
+            s += len(a & b) / k
+        out[f'top{k}'] = s / len(keys)
+    return out
 
 
-def train_epoch(model, train_loader, train_dataset, reconstruction_criterion, 
-                contrastive_criterion, optimizer, args, epoch=0):
-    """训练一个epoch - 使用预采样的批次"""
+def train_epoch(model, loader, criterion, optimizer, device):
     model.train()
-    total_loss = 0
-    reconstruction_loss_sum = 0
-    contrastive_loss_sum = 0
-    
-    # 渐进式策略：动态更新采样策略
-    if args.sample_strategy == 'progressive':
-        if epoch < args.warmup_epochs:
-            # 预热阶段：随机采样
-            strategy = 'random'
-            hard_ratio = 0.0
-        else:
-            # 渐进式增加困难负样本比例
-            strategy = 'hard'
-            progress = (epoch - args.warmup_epochs) / max(1, args.epochs/3 - args.warmup_epochs)
-            hard_ratio = args.progressive_hard_ratio + \
-                        (args.hard_negative_ratio - args.progressive_hard_ratio) * progress
-            hard_ratio = min(hard_ratio, args.hard_negative_ratio)
-        
-        # 更新数据集的采样策略（只在策略改变时更新）
-        train_dataset.update_sample_strategy(strategy, hard_ratio)
-    elif args.sample_strategy == 'hard':
-        # 固定困难负样本策略，每个epoch刷新负样本以增加随机性
-        if epoch > 0 and epoch % 5 == 0:
-            train_dataset.refresh_negative_samples()
-    elif args.sample_strategy == 'random':
-        # 随机策略，每隔几个epoch刷新负样本
-        if epoch > 0 and epoch % args.random_refresh_interval == 0:
-            train_dataset.refresh_negative_samples()
-    
-    
-    current_strategy = train_dataset.sample_strategy
-    current_hard_ratio = train_dataset.hard_negative_ratio if current_strategy == 'hard' else 0.0
-    
-    progress_bar = tqdm(train_loader, 
-                       desc=f"Training (strategy: {current_strategy}, hard_ratio: {current_hard_ratio:.2f})")
-    
-    for batch in progress_bar:
-        # 获取批次数据
-        all_vectors = batch['vectors'].to(args.device)
+    total = 0.0
+    pb = tqdm(loader, desc='Training', leave=False)
+    for batch in pb:
+        x = batch['vectors'].to(device)
         optimizer.zero_grad()
-        # 前向传播：对所有向量进行编码和解码
-        all_embeddings, all_reconstructed = model(all_vectors)
-        
-        if train_dataset.sample_strategy != 'pure_ae':
-            anchor_indices = batch['anchor_indices'].to(args.device)
-            pos_indices = batch['pos_indices'].to(args.device)
-            neg_indices = batch['neg_indices'].to(args.device)
-        
-            # 获取anchor的嵌入和重构
-            anchor_embeddings = all_embeddings[anchor_indices]
-            anchor_reconstructed = all_reconstructed[anchor_indices]
-            anchor_vectors = all_vectors[anchor_indices]
-            
-            # 计算重构损失（只对anchor计算）
-            reconstruction_loss = reconstruction_criterion(anchor_reconstructed, anchor_vectors)
-            
-            # 计算对比损失（使用向量化版本）
-            contrastive_loss = contrastive_criterion(all_embeddings, 
-                                                    anchor_indices,
-                                                    pos_indices, 
-                                                    neg_indices)
-            
-            # 组合损失
-            loss = (1 - args.alpha) * reconstruction_loss + args.alpha * contrastive_loss
-        else:
-            loss = reconstruction_loss = reconstruction_criterion(all_reconstructed,all_vectors)
-        # 反向传播和优化
+        _, x_hat = model(x)
+        loss = criterion(x_hat, x)
         loss.backward()
         optimizer.step()
-        
-        # 记录损失
-        total_loss += loss.item()
-        reconstruction_loss_sum += reconstruction_loss.item()
-        if train_dataset.sample_strategy != 'pure_ae':
-            contrastive_loss_sum += contrastive_loss.item()
-            
-            # 更新进度条
-            progress_bar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'recon': f'{reconstruction_loss.item():.4f}',
-                'contrast': f'{contrastive_loss.item():.4f}'
-            })
-    
-            avg_loss = total_loss / len(train_loader)
-            avg_recon_loss = reconstruction_loss_sum / len(train_loader)
-            avg_contrast_loss = contrastive_loss_sum / len(train_loader)
-            
-        else:
-            progress_bar.set_postfix({
-                'loss': f'{loss.item():.4f}',
-                'recon': f'{reconstruction_loss.item():.4f}'
-            })
-            avg_loss = total_loss / len(train_loader)
-            avg_recon_loss = reconstruction_loss_sum / len(train_loader)
-            avg_contrast_loss = 0
-
-    return avg_loss, avg_recon_loss, avg_contrast_loss
+        total += loss.item()
+        pb.set_postfix(loss=f'{loss.item():.4e}')
+    return total / max(1, len(loader))
 
 
-def validate(model, val_loader, reconstruction_criterion, contrastive_criterion, args):
-    """验证模型"""
+@torch.no_grad()
+def validate(model, loader, criterion, device):
     model.eval()
-    total_loss = 0
-    reconstruction_loss_sum = 0
-    contrastive_loss_sum = 0
-    
-    with torch.no_grad():
-        for batch in tqdm(val_loader, desc="Validation"):
-            all_vectors = batch['vectors'].to(args.device)
-            # 前向传播
-            all_embeddings, all_reconstructed = model(all_vectors)
-            if args.sample_strategy != 'pure_ae':
-                anchor_indices = batch['anchor_indices'].to(args.device)
-                pos_indices = batch['pos_indices'].to(args.device)
-                neg_indices = batch['neg_indices'].to(args.device)
-
-            
-                # 获取anchor的嵌入和重构
-                anchor_embeddings = all_embeddings[anchor_indices]
-                anchor_reconstructed = all_reconstructed[anchor_indices]
-                anchor_vectors = all_vectors[anchor_indices]
-            
-                # 计算重构损失
-                reconstruction_loss = reconstruction_criterion(anchor_reconstructed, anchor_vectors)
-            
-                # 计算对比损失
-                contrastive_loss = contrastive_criterion(all_embeddings,
-                                                        anchor_indices,
-                                                        pos_indices,
-                                                        neg_indices)
-                
-                # 组合损失
-                loss = (1 - args.alpha) * reconstruction_loss + args.alpha * contrastive_loss
-            else:
-                loss = reconstruction_loss = reconstruction_criterion(all_reconstructed,all_vectors)
-            # 记录损失
-            total_loss += loss.item()
-            reconstruction_loss_sum += reconstruction_loss.item()
-            if args.sample_strategy != 'pure_ae':
-                contrastive_loss_sum += contrastive_loss.item()
-    
-    avg_loss = total_loss / len(val_loader)
-    avg_recon_loss = reconstruction_loss_sum / len(val_loader)
-    avg_contrast_loss = contrastive_loss_sum / len(val_loader)
-    
-    return avg_loss, avg_recon_loss, avg_contrast_loss
+    total = 0.0
+    for batch in tqdm(loader, desc='Validation', leave=False):
+        x = batch['vectors'].to(device)
+        _, x_hat = model(x)
+        total += criterion(x_hat, x).item()
+    return total / max(1, len(loader))
 
 
-def evaluate_knn_preservation(model, train_dataset, val_dataset, args):
-    """评估k近邻保持度"""
+@torch.no_grad()
+def evaluate_knn(model, train_dataset, val_dataset, args,
+                 full_base_vectors=None, skip_train_eval=False):
+    """k-NN preservation evaluation on train / val splits."""
     model.eval()
-    
     results = {}
-    
-    # 1. 训练集的k近邻保持度（训练集内部）
-    if args.distance_metric == 'cosine':
-        train_vectors = train_dataset.normalize_vectors.to(args.device) # 归一向量
-    else:
-        train_vectors = train_dataset.vectors.to(args.device)       # 未归一向量
-    
-    with torch.no_grad():
-        train_embeddings = model.encode(train_vectors).cpu()
-    train_original = train_vectors.cpu()
-    
-    # 计算训练集内部的k近邻保持度
+
+    def _vec(ds):
+        return (ds.normalize_vectors if args.distance_metric == 'cosine'
+                else ds.vectors).float().to(args.device)
+
     max_k = max(args.topk_eval)
 
-    if args.distance_metric == 'cosine':
-        train_embeddings = F.normalize(train_embeddings,p=2,dim=1)      # 对降维后向量做归一操作 
-
-    train_original_knn = compute_knn_order(train_original, max_k, args.distance_metric, train_dataset.ids)
-    train_reduced_knn = compute_knn_order(train_embeddings, max_k, args.distance_metric, train_dataset.ids)
-    
-    train_accuracy = calculate_accuracy(
-        train_original_knn,
-        train_reduced_knn,
-        args.topk_eval
-    )
-    
-    # 2. 验证集的k近邻保持度（验证集在训练集中的近邻）
-    if args.distance_metric == "cosine":
-        val_vectors = val_dataset.normalize_vectors.to(args.device) # 归一向量
+    if not skip_train_eval:
+        tv = _vec(train_dataset)
+        te = model.encode(tv).cpu()
+        if args.distance_metric == 'cosine':
+            te = F.normalize(te, p=2, dim=1)
+        tv_cpu = tv.cpu()
+        orig = compute_knn_order(tv_cpu, max_k, args.distance_metric, train_dataset.ids)
+        red = compute_knn_order(te, max_k, args.distance_metric, train_dataset.ids)
+        results['train'] = topk_accuracy(orig, red, args.topk_eval)
     else:
-        val_vectors = val_dataset.vectors.to(args.device)           # 未归一向量
-    with torch.no_grad():
-        val_embeddings = model.encode(val_vectors).cpu()
-    val_original = val_vectors.cpu().numpy()
-    
-    if args.distance_metric == "cosine":
-        val_embeddings = F.normalize(val_embeddings,p=2,dim=1)         # 对降维后向量做归一操作
+        results['train'] = None
 
-    # 计算验证集在训练集中的k近邻
-    val_original_knn = compute_knn_cross_set(
-        val_original, train_original, max_k, 
-        val_dataset.ids, train_dataset.ids,args.distance_metric
-    )
-    val_reduced_knn = compute_knn_cross_set(
-        val_embeddings, train_embeddings, max_k,
-        val_dataset.ids, train_dataset.ids,args.distance_metric
-    )
-    
-    val_accuracy = calculate_accuracy(
-        val_original_knn,
-        val_reduced_knn,
-        args.topk_eval
-    )
-    
-    results['train'] = train_accuracy
-    results['val'] = val_accuracy
-    
+    vv = _vec(val_dataset)
+    ve = model.encode(vv).cpu()
+    if args.distance_metric == 'cosine':
+        ve = F.normalize(ve, p=2, dim=1)
+    vv_cpu = vv.cpu().numpy()
+
+    if full_base_vectors is not None:
+        # SIFT1B: project the full base set in chunks
+        n = len(full_base_vectors)
+        base_tensor = torch.from_numpy(full_base_vectors)
+        if args.distance_metric == 'cosine':
+            out_dtype = torch.float16 if full_base_vectors.dtype == np.float16 else torch.float32
+            normed = torch.empty_like(base_tensor, dtype=out_dtype)
+            for i in range(0, n, 100_000):
+                j = min(i + 100_000, n)
+                b = base_tensor[i:j].float()
+                normed[i:j] = (b / torch.clamp(torch.norm(b, p=2, dim=1, keepdim=True), min=1e-8)).to(out_dtype)
+            base_tensor = normed
+        base_emb = torch.empty((n, args.output_dim), dtype=torch.float32)
+        for i in range(0, n, 100_000):
+            j = min(i + 100_000, n)
+            b = base_tensor[i:j].float().to(args.device)
+            base_emb[i:j] = model.encode(b).cpu()
+        del base_tensor
+        if args.distance_metric == 'cosine':
+            base_emb = F.normalize(base_emb, p=2, dim=1)
+        base_emb_np = base_emb.numpy()
+        base_ids = list(range(n))
+        base_f32 = full_base_vectors.astype(np.float32) if full_base_vectors.dtype != np.float32 else full_base_vectors
+        orig = compute_knn_cross_set(vv_cpu, base_f32, max_k,
+                                     val_dataset.ids, base_ids, args.distance_metric)
+        red = compute_knn_cross_set(ve, base_emb_np, max_k,
+                                    val_dataset.ids, base_ids, args.distance_metric)
+    else:
+        if skip_train_eval:
+            tv = _vec(train_dataset)
+            te = model.encode(tv).cpu()
+            if args.distance_metric == 'cosine':
+                te = F.normalize(te, p=2, dim=1)
+            tv_cpu = tv.cpu()
+        orig = compute_knn_cross_set(vv_cpu, tv_cpu, max_k,
+                                     val_dataset.ids, train_dataset.ids,
+                                     args.distance_metric)
+        red = compute_knn_cross_set(ve, te, max_k,
+                                    val_dataset.ids, train_dataset.ids,
+                                    args.distance_metric)
+
+    results['val'] = topk_accuracy(orig, red, args.topk_eval)
     return results
 
 
-def compute_knn_cross_set(query_vectors, base_vectors, k, query_ids, base_ids, distance_metric):
-    """计算查询集在基准集中的k近邻"""
-    if isinstance(query_vectors, torch.Tensor):
-        query_vectors = query_vectors.cpu().numpy()
-    if isinstance(base_vectors, torch.Tensor):
-        base_vectors = base_vectors.cpu().numpy()
-    
-    # 使用FAISS计算k近邻
-    if distance_metric == 'euclidean':
-        index = faiss.IndexFlatL2(base_vectors.shape[1])
-    else:
-        index = faiss.IndexFlatIP(base_vectors.shape[1])
-    index.add(base_vectors.astype(np.float32))
-    
-    distances, indices = index.search(query_vectors.astype(np.float32), k)
-    
-    # 构建k近邻字典
-    knn_order = {}
-    for i, query_id in enumerate(query_ids):
-        neighbors = [(base_ids[indices[i, j]], float(distances[i, j])) 
-                    for j in range(k)]
-        knn_order[query_id] = neighbors
-    
-    return knn_order
+def build_optimizer(args, model):
+    if args.optimizer == 'AdamW':
+        return optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    if args.optimizer == 'SGD':
+        return optim.SGD(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+    return optim.Adam(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
 
 
 def main():
     args = get_args()
     set_seed(args.seed)
-    
-    # 初始化wandb
+
+    is_sift1b = args.dataset_type == 'SIFT1B'
+
+    save_dir = os.path.join(
+        args.save_dir,
+        f'{args.dataset_type}_{args.embedding_model_type}_{args.num_samples}',
+    )
+    os.makedirs(save_dir, exist_ok=True)
+
     if args.use_wandb:
         import wandb
-         # 正式实验时请在此处写明本组实验所探究的内容，方便官网浏览
-        wandb.init(
-            project=args.wandb_project,
-            entity=args.wandb_entity,
-            name=f"cosine_SGD_{datetime.now().strftime('%Y%m%d_%H%M%S')}",       
-            config=vars(args)
-        )
-    
-    # 创建保存目录
-    os.makedirs(args.save_dir, exist_ok=True)
-    
-    # 创建数据加载器
-    train_loader, val_loader, train_dataset, val_dataset, train_vectors, val_vectors = create_data_loaders(
-        args.data_path, args
-    )
-    
-    # 获取输入维度
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity,
+                   name=f'RAE_{datetime.now().strftime("%Y%m%d_%H%M%S")}',
+                   config=vars(args))
+
+    result = create_data_loaders(args.data_path, args)
+    (train_loader, val_loader, train_dataset, val_dataset,
+     _, _, full_base_vectors, _) = result
+
     input_dim = train_dataset.vectors.size(1)
-        
-    # 创建模型
     model = AutoEncoder(
-        input_dim=input_dim,
-        output_dim=args.output_dim,
+        input_dim=input_dim, output_dim=args.output_dim,
         hidden_dims=args.hidden_dims,
-        activation=args.activation,
-        dropout=args.dropout
+        activation=args.activation, dropout=args.dropout,
     ).to(args.device)
-    
-    # 创建损失函数
-    reconstruction_criterion = nn.MSELoss()
-    
-    # 使用InfoNCE损失（向量化版本）
-    contrastive_criterion = InfoNCELoss(temperature=args.temperature)
-    
-    # 创建优化器
-    if args.optimizer == "AdamW":
-        optimizer = optim.AdamW(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay
-        )
-    elif args.optimizer == "Adam":
-        optimizer = optim.Adam(            
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay
-            )
-    elif args.optimizer == 'SGD':
-        optimizer = optim.SGD(
-            model.parameters(),
-            lr=args.lr,
-            weight_decay=args.weight_decay)
-    else:
-        raise ValueError("优化器参数设置有误，重新设置")
-    
-    # 学习率调度器
+
+    criterion = nn.MSELoss()
+    optimizer = build_optimizer(args, model)
+    epochs = max(1, args.steps // max(1, len(train_loader)))
     scheduler = optim.lr_scheduler.CosineAnnealingLR(
-        optimizer, T_max=args.epochs, eta_min=args.lr * 0.01
+        optimizer, T_max=epochs, eta_min=args.lr * 0.01,
     )
-    
-    # 训练循环
-    best_val_loss = float('inf')
-    best_accuracy = defaultdict(float)
-    
-    for epoch in range(args.epochs):
-        print(f"\nEpoch {epoch + 1}/{args.epochs}")
-        
-        # 训练
-        train_loss, train_recon_loss, train_contrast_loss = train_epoch(
-            model, train_loader, train_dataset, reconstruction_criterion,
-            contrastive_criterion, optimizer, args, epoch
-        )
-        
-        # 验证
-        val_loss, val_recon_loss, val_contrast_loss = validate(
-            model, val_loader, reconstruction_criterion,
-            contrastive_criterion, args
-        )
-        
-        # 更新学习率
+
+    print(f'Input dim {input_dim} -> output dim {args.output_dim} | '
+          f'lambda (weight_decay) = {args.weight_decay} | '
+          f'optimizer = {args.optimizer} | epochs = {epochs}')
+
+    for epoch in range(epochs):
+        train_loss = train_epoch(model, train_loader, criterion, optimizer, args.device)
+        val_loss = validate(model, val_loader, criterion, args.device)
         scheduler.step()
-        
-        # 打印结果
-        print(f"Train Loss: {train_loss:.4f} (Recon: {train_recon_loss:.4f}, "
-              f"Contrast: {train_contrast_loss:.4f})")
-        print(f"Val Loss: {val_loss:.4f} (Recon: {val_recon_loss:.4f}, "
-              f"Contrast: {val_contrast_loss:.4f})")
-        print(f"Learning Rate: {scheduler.get_last_lr()[0]:.6f}")
-        
-        # 定期评估k近邻保持度
-        if (epoch + 1) % args.eval_interval == 0:
-            print("\n评估k近邻保持度...")
-            accuracy_results = evaluate_knn_preservation(model, train_dataset, val_dataset, args)
-            
-            print("训练集k近邻保持准确度:")
-            for k, acc in accuracy_results['train'].items():
-                print(f"  {k}: {acc:.4f}")
-            
-            print("验证集k近邻保持准确度:")
-            for k, acc in accuracy_results['val'].items():
-                print(f"  {k}: {acc:.4f}")
-            
-            # 记录到wandb
-            if args.use_wandb:
-                wandb.log({
-                    f'train_accuracy/{k}': acc
-                    for k, acc in accuracy_results['train'].items()
-                }, step = epoch + 1)
-                wandb.log({
-                    f'val_accuracy/{k}': acc
-                    for k, acc in accuracy_results['val'].items()
-                },step = epoch + 1)
-        
-        # 记录到wandb
+        print(f'Epoch {epoch + 1}/{epochs} | train {train_loss:.4e} | val {val_loss:.4e} | '
+              f'lr {scheduler.get_last_lr()[0]:.2e}')
+
         if args.use_wandb:
-            wandb.log({
-                'train/loss': train_loss,
-                'train/reconstruction_loss': train_recon_loss,
-                'train/contrastive_loss': train_contrast_loss,
-                'val/loss': val_loss,
-                'val/reconstruction_loss': val_recon_loss,
-                'val/contrastive_loss': val_contrast_loss,
-                'lr': scheduler.get_last_lr()[0],
-            },step = epoch + 1)
-        
-        # 保存最佳模型
-        # if val_loss < best_val_loss:
-        #     best_val_loss = val_loss
-        #     checkpoint = {
-        #         'epoch': epoch + 1,
-        #         'model_state_dict': model.state_dict(),
-        #         'optimizer_state_dict': optimizer.state_dict(),
-        #         'scheduler_state_dict': scheduler.state_dict(),
-        #         'val_loss': val_loss,
-        #         'args': args
-        #     }
-        #     torch.save(
-        #         checkpoint,
-        #         os.path.join(args.save_dir, 'best_model.pth')
-        #     )
-        #     print("保存最佳模型!")
-    
-    # 最终评估
-    print("\n最终评估...")
-    final_accuracy = evaluate_knn_preservation(model, train_dataset, val_dataset, args)
-    
-    print("\n最终训练集k近邻保持准确度:")
-    for k, acc in final_accuracy['train'].items():
-        print(f"  {k}: {acc:.4f}")
-    
-    print("\n最终验证集k近邻保持准确度:")
-    for k, acc in final_accuracy['val'].items():
-        print(f"  {k}: {acc:.4f}")
-    
-    # 保存最终结果
-    results = {
-        'args': vars(args),
-        'final_train_accuracy': final_accuracy['train'],
-        'final_val_accuracy': final_accuracy['val']
-    }
-    
-    with open(os.path.join(args.save_dir, 'results.json'), 'w') as f:
-        json.dump(results, f, indent=4)
-    
+            import wandb
+            wandb.log({'train_loss': train_loss, 'val_loss': val_loss,
+                       'lr': scheduler.get_last_lr()[0]}, step=epoch + 1)
+
+        if (epoch + 1) % args.eval_interval == 0:
+            acc = evaluate_knn(model, train_dataset, val_dataset, args,
+                               full_base_vectors=full_base_vectors,
+                               skip_train_eval=is_sift1b)
+            if acc['train'] is not None:
+                print('  train accuracy:', acc['train'])
+            print('  val   accuracy:', acc['val'])
+            if args.use_wandb:
+                import wandb
+                if acc['train'] is not None:
+                    wandb.log({f'train_acc/{k}': v for k, v in acc['train'].items()},
+                              step=epoch + 1)
+                wandb.log({f'val_acc/{k}': v for k, v in acc['val'].items()},
+                          step=epoch + 1)
+
+    print('\nFinal evaluation...')
+    final = evaluate_knn(model, train_dataset, val_dataset, args,
+                         full_base_vectors=full_base_vectors,
+                         skip_train_eval=is_sift1b)
+    if final['train'] is not None:
+        print('Final train accuracy:', final['train'])
+    print('Final val   accuracy:', final['val'])
+
+    out = {'args': vars(args),
+           'final_train_accuracy': final['train'],
+           'final_val_accuracy': final['val']}
+    out_name = (f'{args.output_dim}d_{args.distance_metric}_{args.optimizer}_'
+                f'{args.weight_decay}_normalize{args.if_normalize}_results.json')
+    with open(os.path.join(save_dir, out_name), 'w') as f:
+        json.dump(out, f, indent=2)
+
+    if args.save_last_model:
+        ckpt_name = (f'{args.output_dim}d_{args.optimizer}_{args.weight_decay}'
+                     f'_normalize{args.if_normalize}_model.ckpt')
+        torch.save({'model_state_dict': model.state_dict(),
+                    'args': vars(args)},
+                   os.path.join(save_dir, ckpt_name))
+
     if args.use_wandb:
+        import wandb
         wandb.finish()
-    
-    print("\n训练完成!")
 
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()
