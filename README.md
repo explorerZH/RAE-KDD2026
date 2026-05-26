@@ -65,29 +65,34 @@ data/
   SIFT1B/queries.bvecs
 ```
 
-For the embedding datasets, each file is a pickled dict / NPZ produced
-by the corresponding pre-trained model (CLIP, MPNet, DINOv2). For SIFT1B
-the raw `.bvecs` files from the TEXMEX distribution are used directly.
+Expected internal format of each embedding file:
+
+| File | Structure |
+|------|-----------|
+| `CelebA/CLIP(VIT)/raw_embeddings_withname.pkl` | `dict[identity_id -> dict[jpg_name -> np.ndarray(512,)]]` |
+| `imdb/mpnet/imdb_train_text_embeddings.pkl`    | `dict` with key `'embeddings'`: `list/array` of shape `(N, 768)` |
+| `ImageNet/DINOv2/ImageNet_embeddings.npz`      | NPZ with key `'embeddings'`: `np.ndarray` of shape `(N, 384)` |
+| `flickr30k/CLIP(VIT)/flickr30k_embeddings.pkl` | `dict` with key `'combined_embeddings'`: `list/array` of `(N, 1024)` (image + text features concatenated) |
+| `SIFT1B/learn.bvecs`, `SIFT1B/queries.bvecs`   | Standard TEXMEX `.bvecs` (uint8) — used as-is |
+
+Producing the four embedding files is a one-off step: run the corresponding
+pre-trained encoder (CLIP-ViT for CelebA / Flickr30k, MPNet for IMDb,
+DINOv2 for ImageNet) on the raw inputs and dump in the schema above.
 
 ## Reproducing the main results
 
-### RAE (Table 1)
+Train RAE (Table 1):
 
 ```bash
-# Example: CelebA, reduce 512 -> 256, cosine evaluation
-python code/train.py \
-    --dataset_type CelebA --embedding_model_type "CLIP(VIT)" \
-    --num_samples 10000 \
-    --output_dim 256 --distance_metric cosine \
-    --weight_decay 1e-7 --optimizer Adam --lr 1e-3 --steps 3000
+python code/train.py --dataset_type CelebA --embedding_model_type "CLIP(VIT)" \
+    --num_samples 10000 --output_dim 256 --distance_metric cosine \
+    --weight_decay 2e-5 --steps 3000
 ```
 
-The `--weight_decay` argument is the regularization coefficient
-λ in Eq. (7). The optimal range varies by dataset; the values used in
-the paper are reported in Section 4.3 and can be reproduced by sweeping
-λ ∈ {0, 1e-9, …, 1e-6}.
+`--weight_decay` corresponds to the regularization coefficient λ in
+Eq. (7).
 
-### Baselines (Table 1)
+Run a baseline (Table 1):
 
 ```bash
 python code/baselines.py --method PCA --dataset_type CelebA \
@@ -95,23 +100,10 @@ python code/baselines.py --method PCA --dataset_type CelebA \
     --output_dim 256 --distance_metric cosine
 ```
 
-Replace `--method` with one of: `PCA`, `UMAP`, `ISOMAP`, `MDS`, `RP`, `LPP`.
+`--method` accepts `PCA`, `UMAP`, `ISOMAP`, `MDS`, `RP`, `LPP`.
 
-### SIFT1B (Table 2)
-
-```bash
-# RAE
-python code/train.py --dataset_type SIFT1B --output_dim 64 \
-    --num_train_samples 30000 --num_val_samples 10000 \
-    --distance_metric cosine --weight_decay 1e-7 --steps 3000
-
-# PCA baseline at the same scale
-python code/baselines.py --method PCA --dataset_type SIFT1B \
-    --output_dim 64 --distance_metric cosine \
-    --num_train_samples 30000 --num_val_samples 10000
-```
-
-To match the paper's 50M base-set setting, set `--num_base_samples 50000000`.
+For SIFT1B (Table 2), use `--dataset_type SIFT1B` with `--num_train_samples`,
+`--num_val_samples` and (optionally) `--num_base_samples`.
 
 ## Output
 
