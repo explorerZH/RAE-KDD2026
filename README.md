@@ -1,5 +1,8 @@
 # RAE: Regularized Auto-Encoder for k-NN Preserving Dimensionality Reduction
 
+[![DOI](https://img.shields.io/badge/DOI-10.6084%2Fm9.figshare.32413305-blue)](https://doi.org/10.6084/m9.figshare.32413305)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
+
 Reference implementation for the paper
 
 > Han Zhang and Dongfang Zhao.
